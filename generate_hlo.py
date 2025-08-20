@@ -1,10 +1,12 @@
 import os
+import shutil
+
+# Set XLA flags before importing JAX
 os.environ["XLA_FLAGS"] = " ".join([
     "--xla_force_host_platform_device_count=8",
-    "--xla_dump_to=/tmp/xla_dumps",
+    "--xla_dump_to=/tmp/xla",
     "--xla_dump_hlo_as_text",
-    "--xla_dump_include_timestamp",
-    "--xla_dump_hlo_pass_re=SPMD|Spmd|spmd|ShardingPropagation"
+    "--xla_dump_hlo_pass_re=spmd"
 ])
 
 import jax
@@ -15,6 +17,7 @@ from jax.experimental import shard_map
 from typing import Tuple, Any, Dict, List, Callable, Optional
 import re
 from functools import partial
+import glob
 
 
 def generate_mesh_axes(mesh_shape: Tuple[int, ...]) -> Tuple[str, ...]:
@@ -52,8 +55,14 @@ def generate_hlo_for_sharding_constraints(
         array_shape: Shape of the array to process
         
     Returns:
-        HLO text representation
+        HLO text representation from after SPMD pass
     """
+    # Clear the dump directory to avoid old files
+    dump_dir = "/tmp/xla"
+    if os.path.exists(dump_dir):
+        shutil.rmtree(dump_dir)
+    os.makedirs(dump_dir, exist_ok=True)
+    
     mesh = create_device_mesh(mesh_shape)
     
     def sharded_identity(x):
@@ -71,13 +80,22 @@ def generate_hlo_for_sharding_constraints(
     # Create a dummy input array
     dummy_input = jnp.ones(array_shape)
     
-    # Lower and compile the function
+    # Lower and compile the function (this will trigger HLO dumps)
     lowered = jax.jit(sharded_identity).lower(dummy_input)
     exe = lowered.compile()
     
-    # Extract HLO after SPMD partitioning (post-compilation)
-    # This will include the collectives inserted by SPMD
-    hlo_text = exe.as_text()
+    # Find the HLO file generated after SPMD pass
+    # Look for files with "after_spmd-partitioning" in the name
+    hlo_files = glob.glob(os.path.join(dump_dir, "*after_spmd-partitioning*.txt"))
+    if not hlo_files:
+        raise RuntimeError(f"No HLO files found after SPMD partitioning in {dump_dir}")
+    
+    # If multiple files, take the most recent one
+    hlo_file = max(hlo_files, key=os.path.getmtime)
+    
+    # Read the HLO text from the dumped file
+    with open(hlo_file, 'r') as f:
+        hlo_text = f.read()
     
     return hlo_text
 
@@ -343,17 +361,17 @@ def hlo_to_jax_function(hlo_text: str) -> Callable:
     return jax_function
 
 
-def test_hlo_interpreter(
+def test_hlo_interpreter_and_extract_stablehlo(
     hlo_text: str,
     mesh: Mesh,
     in_specs: P,
     out_specs: P,
     array_shape: Tuple[int, ...]
-) -> bool:
+) -> Tuple[bool, str]:
     """
-    Test if the HLO interpreter correctly reproduces the original function behavior.
+    Test HLO interpreter and extract StableHLO from the resulting JAX function.
     
-    Returns True if the function acts as identity on the full semantic array.
+    Returns (is_identity, stablehlo_text)
     """
     # Convert HLO to JAX function
     jax_func = hlo_to_jax_function(hlo_text)
@@ -370,11 +388,36 @@ def test_hlo_interpreter(
     test_input = jnp.arange(np.prod(array_shape)).reshape(array_shape)
     test_input_sharded = jax.device_put(test_input, NamedSharding(mesh, in_specs))
     
-    # Run the function
-    result = sharded_func(test_input_sharded)
+    # JIT compile the JAX function and extract StableHLO
+    jitted_func = jax.jit(sharded_func)
+    lowered = jitted_func.lower(test_input_sharded)
+    
+    # Extract StableHLO representation
+    stablehlo_text = lowered.as_text()
+    
+    # Run the function to test correctness
+    result = jitted_func(test_input_sharded)
     
     # Check if result equals input (identity function)
-    return jnp.allclose(result, test_input)
+    is_identity = jnp.allclose(result, test_input)
+    
+    return is_identity, stablehlo_text
+
+
+def test_hlo_interpreter(
+    hlo_text: str,
+    mesh: Mesh,
+    in_specs: P,
+    out_specs: P,
+    array_shape: Tuple[int, ...]
+) -> bool:
+    """
+    Test if the HLO interpreter correctly reproduces the original function behavior.
+    
+    Returns True if the function acts as identity on the full semantic array.
+    """
+    is_identity, _ = test_hlo_interpreter_and_extract_stablehlo(hlo_text, mesh, in_specs, out_specs, array_shape)
+    return is_identity
 
 
 if __name__ == "__main__":
@@ -386,118 +429,15 @@ if __name__ == "__main__":
     in_spec = P('a', 'b')  # Shard along both mesh axes
     out_spec = P(None, ('a', 'b'))  # Different output sharding to test collectives
     
-    print("=== Generating HLO for sharding constraints ===")
     hlo = generate_hlo_for_sharding_constraints(in_spec, out_spec, mesh_shape, array_shape)
-    print("Generated HLO:")
-    print(hlo[:2000] + "..." if len(hlo) > 2000 else hlo)
-    print()
+    print(hlo)
     
-    print("=== Testing HLO Interpreter ===")
-    try:
-        # Create mesh for testing
-        devices = np.array(jax.devices()[:4]).reshape(2, 2)
-        mesh = Mesh(devices, ('a', 'b'))
-        
-        # Test the interpreter
-        is_identity = test_hlo_interpreter(hlo, mesh, in_spec, out_spec, array_shape)
-        print(f"HLO interpreter test result: {'PASS' if is_identity else 'FAIL'}")
-        
-    except HLOParseError as e:
-        print(f"HLO Parse Error: {e}")
-        print("This indicates we encountered an HLO operation that needs to be implemented.")
-    except Exception as e:
-        print(f"Error during testing: {e}")
+    devices = np.array(jax.devices()[:4]).reshape(2, 2)
+    mesh = Mesh(devices, ('a', 'b'))
     
-    # Always run the parser demonstration
-    print("\n=== Testing Generic Parser on Simple Operations ===")
-    simple_hlo_sample = """
-    HloModule test
-    %param = f32[4,4]{1,0} parameter(0)
-    %add_result = f32[4,4]{1,0} add(%param, %param)
-    %copy_result = f32[4,4]{1,0} copy(%add_result)
-    """
-    
-    parser = HLOParser()
-    try:
-        simple_ops = parser.parse(simple_hlo_sample)
-        print("✓ Generic parser successfully parsed sample operations:")
-        for i, op in enumerate(simple_ops):
-            print(f"  {i+1}. {op['type']}: {op['var']} <- {op.get('operand', op.get('operands', 'N/A'))}")
-            if len(op) > 4:  # More than just type, var, shape, dtype
-                extra_attrs = {k: v for k, v in op.items() if k not in ['type', 'var', 'shape', 'dtype']}
-                print(f"      Attributes: {extra_attrs}")
-    except Exception as e:
-        print(f"Parser test failed: {e}")
-    
-    # Test metadata parsing as regular attributes
-    print("\n=== Testing Metadata/Sharding as Regular Attributes ===")
-    metadata_sample = """
-    %test_op = f32[4,4]{1,0} copy(%param), metadata={op_name="test_copy" source_file="/test.py" source_line=42}
-    %sharded_op = f32[4,4]{1,0} copy(%param), sharding={devices=[2,1]<=[2]}
-    """
-    
-    try:
-        metadata_ops = parser.parse(metadata_sample)
-        print("✓ Metadata and sharding parsed as regular attributes:")
-        for i, op in enumerate(metadata_ops):
-            print(f"  {i+1}. {op['type']}: {op['var']}")
-            if 'metadata' in op:
-                print(f"      metadata: {op['metadata']}")
-            if 'sharding' in op:
-                print(f"      sharding: {op['sharding']}")
-    except Exception as e:
-        print(f"Metadata parsing test failed: {e}")
-        
-    print("\n=== Additional Test: Simple Identity Case ===")
-    # Test with simpler sharding that should produce minimal HLO
-    simple_in_spec = P('a', None)
-    simple_out_spec = P('a', None)  # Same sharding, should be identity
-    
-    simple_hlo = generate_hlo_for_sharding_constraints(
-        simple_in_spec, simple_out_spec, mesh_shape, array_shape
+    is_identity, stablehlo_text = test_hlo_interpreter_and_extract_stablehlo(
+        hlo, mesh, in_spec, out_spec, array_shape
     )
-    
-    try:
-        simple_is_identity = test_hlo_interpreter(
-            simple_hlo, mesh, simple_in_spec, simple_out_spec, array_shape
-        )
-        print(f"Simple identity test result: {'PASS' if simple_is_identity else 'FAIL'}")
-        
-        if simple_is_identity:
-            print("✓ HLO interpreter successfully reproduces identity function behavior!")
-            print("✓ The shard_map wrapper works correctly")
-            print("✓ Parser correctly handles basic HLO operations")
-        
-    except HLOParseError as e:
-        print(f"Simple test HLO Parse Error: {e}")
-        print("Even simple case needs implementation - this helps identify required operations.")
-        
-    print("\n=== Testing Pattern Matching Interpreter ===")
-    # Test the interpreter directly with simple operations
-    test_ops = [
-        {'type': 'parameter', 'operand': '0', 'var': 'param', 'shape': (4, 4), 'dtype': 'f32'},
-        {'type': 'add', 'operands': ['param', 'param'], 'var': 'sum', 'shape': (4, 4), 'dtype': 'f32'},
-        {'type': 'copy', 'operand': 'sum', 'var': 'result', 'shape': (4, 4), 'dtype': 'f32'}
-    ]
-    
-    interpreter = HLOInterpreter()
-    test_input = jnp.ones((4, 4))
-    
-    try:
-        result = interpreter.interpret(test_ops, [test_input])
-        expected = test_input + test_input  # Should be 2 * ones = 2s everywhere
-        print(f"✓ Pattern matching interpreter working: result shape {result.shape}")
-        print(f"✓ Correctly computed param + param = {result[0,0]} (expected 2.0)")
-    except Exception as e:
-        print(f"Pattern matching test failed: {e}")
-
-    print("\n=== Status Summary ===")
-    print("✓ HLO parser implemented with line-by-line parsing")
-    print("✓ Error handling - fails fast on unrecognized operations") 
-    print("✓ Basic JAX LAX primitive interpretation working")
-    print("✓ shard_map integration functional")
-    print("✓ Test harness with device_put and NamedSharding working")
-    print("✓ Python pattern matching used in interpreter")
-    print("✓ Generic attribute parsing (metadata, sharding, etc.)")
-    print("⚠ Complex fusion operations need additional implementation")
-    print("⚠ Advanced collective operations need implementation when encountered")
+    print(f"HLO interpreter test: {'PASS' if is_identity else 'FAIL'}")
+    print("\n=== StableHLO from JAX interpreter ===")
+    print(stablehlo_text)
