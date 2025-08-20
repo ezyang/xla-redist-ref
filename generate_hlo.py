@@ -327,6 +327,21 @@ class HLOInterpreter:
                 # For all-reduce, we sum across all devices
                 return jax.lax.psum(operand, axis_name=None)
             
+            # Reshape operation: requires 'operand' and 'shape'
+            case {'type': 'reshape', 'operand': operand_name, 'shape': shape}:
+                operand = self.variables[operand_name]
+                return jax.lax.reshape(operand, shape)
+            
+            # All-to-all operation: requires 'operand' and 'dimensions'
+            case {'type': 'all-to-all', 'operand': operand_name, 'dimensions': dimensions}:
+                operand = self.variables[operand_name]
+                raise NotImplementedError()
+            
+            # Collective-permute operation: requires 'operand' and 'source_target_pairs'
+            case {'type': 'collective-permute', 'operand': operand_name, 'source_target_pairs': pairs}:
+                operand = self.variables[operand_name]
+                raise NotImplementedError()
+            
             # Catch-all for missing required fields
             case {'type': op_type}:
                 raise HLOParseError(f"Operation '{op_type}' missing required fields or not implemented: {op}")
