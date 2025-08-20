@@ -15,8 +15,8 @@ class HLOParser:
         self.operations = []  # List of parsed operations
         
     def parse_shape(self, shape_str: str) -> Tuple[Tuple[int, ...], str]:
-        """Parse HLO shape string like 'f32[1024,1024]' -> ((1024, 1024), 'f32')"""
-        match = re.match(r'(\w+)\[([^\]]+)\]', shape_str)
+        """Parse HLO shape string like 'f32[1024,1024]' or 'u32[]' -> ((1024, 1024), 'f32') or ((), 'u32')"""
+        match = re.match(r'(\w+)\[([^\]]*)\]', shape_str)
         if not match:
             raise HLOParseError(f"Cannot parse shape: {shape_str}")
         
@@ -24,7 +24,7 @@ class HLOParser:
         dims_str = match.group(2)
         
         if dims_str.strip() == "":
-            shape = ()
+            shape = ()  # Scalar shape
         else:
             shape = tuple(int(d.strip()) for d in dims_str.split(','))
         

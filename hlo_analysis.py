@@ -39,7 +39,8 @@ def test_hlo_interpreter_and_extract_stablehlo(
         jax.shard_map,
         mesh=mesh,
         in_specs=in_specs,
-        out_specs=out_specs
+        out_specs=out_specs,
+        check_vma=False  # Allow replication without static inference
     )(jax_func)
     
     # Create test input as f32 to match original trace

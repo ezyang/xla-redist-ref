@@ -1,6 +1,7 @@
 import re
 import jax
 import jax.lax
+import jax.numpy as jnp
 from jax.sharding import Mesh
 from typing import Dict, Any, List, Callable
 from hlo_parsing import HLOParseError, HLOParser
@@ -35,6 +36,62 @@ class HLOInterpreter:
             case {'type': 'copy', 'operand': operand_name}:
                 return self.variables[operand_name]  # Identity operation
             
+            # Partition-id operation: returns the current device's partition ID
+            case {'type': 'partition-id', 'shape': shape, 'dtype': dtype}:
+                # Use axis_index to get the partition ID, but we need to handle multi-dimensional meshes
+                # For a multi-dim mesh, partition-id gives the flattened device index
+                target_dtype = dtype.replace('u32', 'uint32').replace('s32', 'int32').replace('f32', 'float32')
+                
+                if len(self.device_mesh.shape) == 1:
+                    # Simple 1D case
+                    axis_name = self.device_mesh.axis_names[0]
+                    partition_id = jax.lax.axis_index(axis_name)
+                else:
+                    # Multi-dimensional case: compute flattened index
+                    # For 2D mesh (a,b), device at position (i,j) has flattened ID: i * mesh_b_size + j
+                    mesh_shape = self.device_mesh.shape
+                    axis_names = self.device_mesh.axis_names
+                    
+                    # Get indices for each axis
+                    indices = [jax.lax.axis_index(name) for name in axis_names]
+                    
+                    # Compute flattened index (row-major order)
+                    partition_id = indices[0]
+                    for i in range(1, len(indices)):
+                        partition_id = partition_id * mesh_shape[i] + indices[i]
+                
+                return jnp.array(partition_id, dtype=jnp.dtype(target_dtype))
+            
+            # Constant operation: requires 'operands' containing the constant value
+            case {'type': 'constant', 'operands': operands, 'shape': shape, 'dtype': dtype}:
+                # Parse constant value from operands list
+                if operands and isinstance(operands[0], str):
+                    # Handle cases like ['{0', '2', '4', '6}'] - join and parse
+                    if operands[0].startswith('{') and len(operands) > 1:
+                        # Reconstruct the full constant string
+                        const_str = ''.join(operands)
+                        # Remove braces and parse as array
+                        values_str = const_str.strip('{}')
+                        if values_str:
+                            if dtype.startswith('s') or dtype.startswith('u'):  # integer types
+                                values = [int(x.strip()) for x in values_str.split(',') if x.strip()]
+                            else:  # float types
+                                values = [float(x.strip()) for x in values_str.split(',') if x.strip()]
+                            return jnp.array(values, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                        else:
+                            # Empty constant
+                            return jnp.array([], dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                    else:
+                        # Single value
+                        if dtype.startswith('s') or dtype.startswith('u'):  # integer types
+                            value = int(operands[0])
+                        else:  # float types  
+                            value = float(operands[0])
+                        return jnp.array(value, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                else:
+                    # Default to zeros if no operands
+                    return jnp.zeros(shape, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+            
             # Concatenate operation: requires 'operands' and 'dimensions'
             case {'type': 'concatenate', 'operands': operand_names, 'dimensions': dims}:
                 operands = [self.variables[name] for name in operand_names]
@@ -67,6 +124,21 @@ class HLOInterpreter:
                     result = jax.lax.slice_in_dim(result, s.start, s.stop, axis=i)
                 return result
             
+            # Dynamic slice operation: requires 'operands' and 'dynamic_slice_sizes'
+            case {'type': 'dynamic-slice', 'operands': operand_names, 'dynamic_slice_sizes': slice_sizes}:
+                # First operand is the array to slice, rest are start indices
+                array = self.variables[operand_names[0]]
+                start_indices = [self.variables[name] for name in operand_names[1:]]
+                
+                # Convert slice_sizes to list if it's a single value
+                if isinstance(slice_sizes, (int, list)):
+                    sizes = slice_sizes if isinstance(slice_sizes, list) else [slice_sizes]
+                else:
+                    sizes = [slice_sizes]
+                
+                # Use JAX dynamic_slice
+                return jax.lax.dynamic_slice(array, start_indices, sizes)
+            
             # All-reduce operation: requires 'operand'
             case {'type': 'all-reduce', 'operand': operand_name}:
                 operand = self.variables[operand_name]
@@ -87,6 +159,15 @@ class HLOInterpreter:
                 concat_axis = split_axis
                 axis_name = self.device_mesh.axis_names[0]  # Use first mesh axis
                 return jax.lax.all_to_all(operand, axis_name, split_axis, concat_axis)
+            
+            # All-gather operation: requires 'operand' and 'dimensions' 
+            case {'type': 'all-gather', 'operand': operand_name, 'dimensions': dimensions, **kwargs}:
+                operand = self.variables[operand_name]
+                # Use the specified dimension for all-gather communication
+                axis_name = self.device_mesh.axis_names[0]  # Use first mesh axis
+                concat_axis = dimensions[0] if dimensions else 0
+                # Use tiled=True to concatenate along existing axis instead of creating new axis
+                return jax.lax.all_gather(operand, axis_name, axis=concat_axis, tiled=True)
             
             # Collective-permute operation: requires 'operand' and 'source_target_pairs'
             case {'type': 'collective-permute', 'operand': operand_name, 'source_target_pairs': pairs}:
