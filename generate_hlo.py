@@ -133,15 +133,47 @@ class HLOParser:
         """Parse HLO attributes like 'dimensions={2}', 'channel_id=1', or 'slice={[0:2], [0:1]}'"""
         attributes = {}
         
-        # Find all attribute=value pairs (both {value} and plain value)
-        attr_pattern = r'(\w+)=(\{[^}]*\}|[^,\s]+)'
-        for match in re.finditer(attr_pattern, attr_string):
-            attr_name = match.group(1)
-            attr_value = match.group(2).strip()
+        # Handle nested braces by finding balanced braces for complex attributes
+        i = 0
+        while i < len(attr_string):
+            # Look for attribute name
+            name_match = re.match(r'(\w+)=', attr_string[i:])
+            if not name_match:
+                # Skip to next character if no match
+                i += 1
+                continue
             
-            # Handle braced values
-            if attr_value.startswith('{') and attr_value.endswith('}'):
-                attr_value = attr_value[1:-1].strip()
+            attr_name = name_match.group(1)
+            i += name_match.end()
+            
+            if i >= len(attr_string):
+                break
+                
+            # Parse the value after the '='
+            if attr_string[i] == '{':
+                # Handle braced values with potential nesting
+                brace_count = 0
+                start = i
+                while i < len(attr_string):
+                    if attr_string[i] == '{':
+                        brace_count += 1
+                    elif attr_string[i] == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            i += 1
+                            break
+                    i += 1
+                
+                attr_value = attr_string[start:i]
+                # Remove outer braces
+                if attr_value.startswith('{') and attr_value.endswith('}'):
+                    attr_value = attr_value[1:-1].strip()
+            else:
+                # Handle simple values (no braces)
+                start = i
+                while i < len(attr_string) and attr_string[i] not in ',\s':
+                    i += 1
+                attr_value = attr_string[start:i].strip()
             
             # Parse different attribute types
             if attr_name == 'dimensions':
@@ -153,12 +185,19 @@ class HLOParser:
             elif attr_name == 'slice':
                 # Keep slice specification as string for later parsing
                 attributes[attr_name] = attr_value
-            elif attr_name.endswith('_id') or attr_value.isdigit():
+            elif attr_name == 'source_target_pairs':
+                # Keep source_target_pairs as string for collective-permute parsing
+                attributes[attr_name] = attr_value
+            elif attr_name.endswith('_id') or (attr_value.isdigit() if attr_value else False):
                 # Parse numeric attributes like channel_id
                 attributes[attr_name] = int(attr_value)
             else:
                 # Store other attributes as strings
                 attributes[attr_name] = attr_value
+            
+            # Skip whitespace and commas
+            while i < len(attr_string) and attr_string[i] in ', \t':
+                i += 1
                 
         return attributes
     
@@ -347,11 +386,25 @@ class HLOInterpreter:
             # Collective-permute operation: requires 'operand' and 'source_target_pairs'
             case {'type': 'collective-permute', 'operand': operand_name, 'source_target_pairs': pairs}:
                 operand = self.variables[operand_name]
-                # Parse source-target pairs and use first mesh axis
-                axis_name = self.device_mesh.axis_names[0]
-                # For now, implement as identity - collective-permute needs more sophisticated handling
-                # This would need to parse the pairs and implement the permutation logic
-                return jax.lax.ppermute(operand, axis_name, perm=[(i, i) for i in range(self.device_mesh.devices.shape[0])])
+                
+                # Parse source-target pairs from string like "{{0,0},{2,1},{1,2},{3,3}}"
+                perm_pairs = []
+                # Extract pairs using regex: find all {number,number} patterns
+                import re
+                pair_matches = re.findall(r'\{(\d+),(\d+)\}', pairs)
+                for src, tgt in pair_matches:
+                    perm_pairs.append((int(src), int(tgt)))
+                
+                # For multi-axis mesh, we need to use all axis names for ppermute
+                # JAX ppermute expects axis_name to be a tuple for multi-axis permutation
+                axis_names = self.device_mesh.axis_names
+                
+                if len(axis_names) == 1:
+                    # Single axis case
+                    return jax.lax.ppermute(operand, axis_names[0], perm=perm_pairs)
+                else:
+                    # Multi-axis case: use all axes together
+                    return jax.lax.ppermute(operand, axis_names, perm=perm_pairs)
             
             # Catch-all for missing required fields
             case {'type': op_type}:
@@ -447,6 +500,18 @@ def test_hlo_interpreter_and_extract_stablehlo(
     
     # Check if result equals input (identity function)
     is_identity = jnp.allclose(result, test_input)
+    
+    # Debug: Print actual vs expected values when test fails
+    if not is_identity:
+        print(f"\n=== HLO INTERPRETER TEST FAILURE DEBUG ===")
+        print(f"Expected (input): {test_input}")
+        print(f"Actual (output):  {result}")
+        print(f"Shape - Expected: {test_input.shape}, Actual: {result.shape}")
+        print(f"Close elements: {jnp.isclose(result, test_input).sum()}/{test_input.size}")
+        if test_input.size <= 64:  # Only show diff for small arrays
+            print(f"Difference: {result - test_input}")
+        print(f"Max absolute difference: {jnp.max(jnp.abs(result - test_input))}")
+        print("=== END DEBUG ===\n")
     
     return is_identity, stablehlo_text, post_spmd_hlo_text
 
