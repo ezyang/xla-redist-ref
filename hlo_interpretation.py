@@ -10,7 +10,7 @@ from hlo_parsing import HLOParseError, HLOParser
 class HLOInterpreter:
     """Interprets parsed HLO operations as JAX LAX primitives."""
     
-    def __init__(self, device_mesh: Mesh, sharding_context=None):
+    def __init__(self, device_mesh: Mesh, sharding_context):
         self.variables = {}
         self.device_mesh = device_mesh
         self.sharding_context = sharding_context or {}
