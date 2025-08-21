@@ -49,8 +49,8 @@ class HLOInterpreter:
                 else:
                     # Multi-dimensional case: compute flattened index
                     # For 2D mesh (a,b), device at position (i,j) has flattened ID: i * mesh_b_size + j
-                    mesh_shape = self.device_mesh.shape
                     axis_names = self.device_mesh.axis_names
+                    mesh_sizes = [self.device_mesh.shape[name] for name in axis_names]
                     
                     # Get indices for each axis
                     indices = [jax.lax.axis_index(name) for name in axis_names]
@@ -58,7 +58,7 @@ class HLOInterpreter:
                     # Compute flattened index (row-major order)
                     partition_id = indices[0]
                     for i in range(1, len(indices)):
-                        partition_id = partition_id * mesh_shape[i] + indices[i]
+                        partition_id = partition_id * mesh_sizes[i] + indices[i]
                 
                 return jnp.array(partition_id, dtype=jnp.dtype(target_dtype))
             
