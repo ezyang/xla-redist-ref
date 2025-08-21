@@ -103,12 +103,46 @@ class HLOParser:
         return attributes
     
     def parse_operands(self, operand_string: str) -> List[str]:
-        """Parse operand list like '%param_0.3, %param_1' -> ['param_0.3', 'param_1']"""
+        """Parse operand list like '%param_0.3, %param_1' -> ['param_0.3', 'param_1']
+        Also handles constant values like '{0, 0, 1, 1}' as a single operand."""
         operands = []
-        for operand in operand_string.split(','):
-            operand = operand.strip().lstrip('%')
-            if operand:
-                operands.append(operand)
+        i = 0
+        while i < len(operand_string):
+            # Skip whitespace
+            while i < len(operand_string) and operand_string[i] in ' \t':
+                i += 1
+            
+            if i >= len(operand_string):
+                break
+            
+            # Check if we have a braced expression
+            if operand_string[i] == '{':
+                # Find matching closing brace
+                brace_count = 0
+                start = i
+                while i < len(operand_string):
+                    if operand_string[i] == '{':
+                        brace_count += 1
+                    elif operand_string[i] == '}':
+                        brace_count -= 1
+                        if brace_count == 0:
+                            i += 1
+                            break
+                    i += 1
+                operands.append(operand_string[start:i])
+            else:
+                # Regular operand - find next comma or end
+                start = i
+                while i < len(operand_string) and operand_string[i] != ',':
+                    i += 1
+                operand = operand_string[start:i].strip().lstrip('%')
+                if operand:
+                    operands.append(operand)
+            
+            # Skip comma if present
+            if i < len(operand_string) and operand_string[i] == ',':
+                i += 1
+        
         return operands
 
     def parse_operation(self, line: str) -> Optional[Dict[str, Any]]:

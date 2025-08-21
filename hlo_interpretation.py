@@ -55,10 +55,17 @@ class HLOInterpreter:
                     indices = [jax.lax.axis_index(name) for name in axis_names]
                     sizes = [jax.lax.axis_size(name) for name in axis_names]
                     
+                    # Debug: Print what we're computing
+                    debug_info = jnp.stack([indices[0], indices[1] if len(indices) > 1 else 0])
+                    jax.debug.print("partition-id debug: axis indices = {}, sizes = {}", 
+                                    debug_info, jnp.array(sizes))
+                    
                     # Compute flattened index (row-major order): i0 * S1*S2*... + i1 * S2*S3*... + ...
                     partition_id = indices[0]
                     for i in range(1, len(indices)):
                         partition_id = partition_id * sizes[i] + indices[i]
+                    
+                    jax.debug.print("partition-id: computed partition_id = {}", partition_id)
                 
                 # Convert to target dtype and return as scalar
                 return partition_id.astype(jnp.dtype(target_dtype))
@@ -137,8 +144,14 @@ class HLOInterpreter:
                 else:
                     sizes = [slice_sizes]
                 
+                # Debug: print what we're slicing
+                jax.debug.print("dynamic-slice: array[0] from {} = {}, start_indices = {}, sizes = {}", 
+                               operand_names[0], array, start_indices, sizes)
+                
                 # Use JAX dynamic_slice
-                return jax.lax.dynamic_slice(array, start_indices, sizes)
+                result = jax.lax.dynamic_slice(array, start_indices, sizes)
+                jax.debug.print("dynamic-slice result: {}", result)
+                return result
             
             # All-reduce operation: requires 'operand'
             case {'type': 'all-reduce', 'operand': operand_name}:
