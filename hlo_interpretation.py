@@ -38,29 +38,30 @@ class HLOInterpreter:
             
             # Partition-id operation: returns the current device's partition ID
             case {'type': 'partition-id', 'shape': shape, 'dtype': dtype}:
-                # Use axis_index to get the partition ID, but we need to handle multi-dimensional meshes
-                # For a multi-dim mesh, partition-id gives the flattened device index
+                # Compute partition ID using axis_index within JAX function execution context
+                # This ensures each device gets the correct partition ID when executed
                 target_dtype = dtype.replace('u32', 'uint32').replace('s32', 'int32').replace('f32', 'float32')
                 
                 if len(self.device_mesh.shape) == 1:
-                    # Simple 1D case
+                    # Simple 1D case: partition ID is just the axis index
                     axis_name = self.device_mesh.axis_names[0]
                     partition_id = jax.lax.axis_index(axis_name)
                 else:
-                    # Multi-dimensional case: compute flattened index
-                    # For 2D mesh (a,b), device at position (i,j) has flattened ID: i * mesh_b_size + j
+                    # Multi-dimensional case: compute flattened index using axis_index and axis_size
+                    # For 2D mesh (a,b), device at position (i,j) has flattened ID: i * size_b + j
                     axis_names = self.device_mesh.axis_names
-                    mesh_sizes = [self.device_mesh.shape[name] for name in axis_names]
                     
-                    # Get indices for each axis
+                    # Get axis indices and sizes
                     indices = [jax.lax.axis_index(name) for name in axis_names]
+                    sizes = [jax.lax.axis_size(name) for name in axis_names]
                     
-                    # Compute flattened index (row-major order)
+                    # Compute flattened index (row-major order): i0 * S1*S2*... + i1 * S2*S3*... + ...
                     partition_id = indices[0]
                     for i in range(1, len(indices)):
-                        partition_id = partition_id * mesh_sizes[i] + indices[i]
+                        partition_id = partition_id * sizes[i] + indices[i]
                 
-                return jnp.array(partition_id, dtype=jnp.dtype(target_dtype))
+                # Convert to target dtype and return as scalar
+                return partition_id.astype(jnp.dtype(target_dtype))
             
             # Constant operation: requires 'operands' containing the constant value
             case {'type': 'constant', 'operands': operands, 'shape': shape, 'dtype': dtype}:
