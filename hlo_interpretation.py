@@ -162,6 +162,9 @@ class HLOInterpreter:
                 # Convert slice_sizes to list if it's a single value
                 if isinstance(slice_sizes, (int, list)):
                     sizes = slice_sizes if isinstance(slice_sizes, list) else [slice_sizes]
+                elif isinstance(slice_sizes, str):
+                    # Parse comma-separated string like "2,8" into [2, 8]
+                    sizes = [int(x.strip()) for x in slice_sizes.split(',')]
                 else:
                     sizes = [slice_sizes]
                 
@@ -240,6 +243,36 @@ class HLOInterpreter:
                 else:
                     # Multi-axis case: use all axes together
                     return jax.lax.ppermute(operand, axis_names, perm=perm_pairs)
+            
+            # Subtract operation: requires 'operands' (two operands)
+            case {'type': 'subtract', 'operands': operand_names}:
+                if len(operand_names) >= 2:
+                    lhs = self.variables[operand_names[0]]
+                    rhs = self.variables[operand_names[1]]
+                    return jax.lax.sub(lhs, rhs)
+                else:
+                    raise HLOParseError(f"Subtract operation requires at least 2 operands, got {len(operand_names)}")
+            
+            # Compare operation: requires 'operands' and 'direction'
+            case {'type': 'compare', 'operands': operand_names, 'direction': direction}:
+                if len(operand_names) >= 2:
+                    lhs = self.variables[operand_names[0]]
+                    rhs = self.variables[operand_names[1]]
+                    # Map HLO comparison directions to JAX lax comparison functions
+                    compare_ops = {
+                        'EQ': jax.lax.eq,
+                        'NE': jax.lax.ne,
+                        'LT': jax.lax.lt,
+                        'LE': jax.lax.le,
+                        'GT': jax.lax.gt,
+                        'GE': jax.lax.ge,
+                    }
+                    if direction in compare_ops:
+                        return compare_ops[direction](lhs, rhs)
+                    else:
+                        raise HLOParseError(f"Unsupported comparison direction: {direction}")
+                else:
+                    raise HLOParseError(f"Compare operation requires at least 2 operands, got {len(operand_names)}")
             
             # Catch-all for missing required fields
             case {'type': op_type}:
