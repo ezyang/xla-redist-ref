@@ -55,17 +55,10 @@ class HLOInterpreter:
                     indices = [jax.lax.axis_index(name) for name in axis_names]
                     sizes = [jax.lax.axis_size(name) for name in axis_names]
                     
-                    # Debug: Print what we're computing
-                    debug_info = jnp.stack([indices[0], indices[1] if len(indices) > 1 else 0])
-                    jax.debug.print("partition-id debug: axis indices = {}, sizes = {}", 
-                                    debug_info, jnp.array(sizes))
-                    
                     # Compute flattened index (row-major order): i0 * S1*S2*... + i1 * S2*S3*... + ...
                     partition_id = indices[0]
                     for i in range(1, len(indices)):
                         partition_id = partition_id * sizes[i] + indices[i]
-                    
-                    jax.debug.print("partition-id: computed partition_id = {}", partition_id)
                 
                 # Convert to target dtype and return as scalar
                 return partition_id.astype(jnp.dtype(target_dtype))
@@ -98,6 +91,33 @@ class HLOInterpreter:
                         return jnp.array(value, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
                 else:
                     # Default to zeros if no operands
+                    return jnp.zeros(shape, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+            
+            # Constant operation: single 'operand' field (after parser fix)
+            case {'type': 'constant', 'operand': operand, 'shape': shape, 'dtype': dtype}:
+                # Parse constant value from single operand string
+                if operand and isinstance(operand, str):
+                    # Handle braced constant like '{0, 0, 1, 1}'
+                    if operand.startswith('{') and operand.endswith('}'):
+                        values_str = operand.strip('{}')
+                        if values_str:
+                            if dtype.startswith('s') or dtype.startswith('u'):  # integer types
+                                values = [int(x.strip()) for x in values_str.split(',') if x.strip()]
+                            else:  # float types
+                                values = [float(x.strip()) for x in values_str.split(',') if x.strip()]
+                            return jnp.array(values, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                        else:
+                            # Empty constant
+                            return jnp.array([], dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                    else:
+                        # Single value without braces
+                        if dtype.startswith('s') or dtype.startswith('u'):  # integer types
+                            value = int(operand)
+                        else:  # float types  
+                            value = float(operand)
+                        return jnp.array(value, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                else:
+                    # Default to zeros if no operand
                     return jnp.zeros(shape, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
             
             # Concatenate operation: requires 'operands' and 'dimensions'
@@ -144,14 +164,8 @@ class HLOInterpreter:
                 else:
                     sizes = [slice_sizes]
                 
-                # Debug: print what we're slicing
-                jax.debug.print("dynamic-slice: array[0] from {} = {}, start_indices = {}, sizes = {}", 
-                               operand_names[0], array, start_indices, sizes)
-                
                 # Use JAX dynamic_slice
-                result = jax.lax.dynamic_slice(array, start_indices, sizes)
-                jax.debug.print("dynamic-slice result: {}", result)
-                return result
+                return jax.lax.dynamic_slice(array, start_indices, sizes)
             
             # All-reduce operation: requires 'operand'
             case {'type': 'all-reduce', 'operand': operand_name}:
