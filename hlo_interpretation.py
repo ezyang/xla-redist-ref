@@ -10,9 +10,10 @@ from hlo_parsing import HLOParseError, HLOParser
 class HLOInterpreter:
     """Interprets parsed HLO operations as JAX LAX primitives."""
     
-    def __init__(self, device_mesh: Mesh):
+    def __init__(self, device_mesh: Mesh, sharding_context=None):
         self.variables = {}
         self.device_mesh = device_mesh
+        self.sharding_context = sharding_context or {}
         
     def interpret_operation(self, op: Dict[str, Any], inputs: List[Any]) -> Any:
         """Interpret a single HLO operation as JAX LAX primitives using pattern matching."""
@@ -191,8 +192,28 @@ class HLOInterpreter:
             # All-gather operation: requires 'operand' and 'dimensions' 
             case {'type': 'all-gather', 'operand': operand_name, 'dimensions': dimensions, **kwargs}:
                 operand = self.variables[operand_name]
-                # Use the specified dimension for all-gather communication
-                axis_name = self.device_mesh.axis_names[0]  # Use first mesh axis
+                
+                # Use sharding context to determine the correct axis for all-gather
+                input_spec = self.sharding_context.get('input_spec', None)
+                output_spec = self.sharding_context.get('output_spec', None)
+                
+                if input_spec is not None and output_spec is not None:
+                    # We have sharding context - use it to determine the axis
+                    # For X -> P(None) transformations, gather along the axis that X specifies
+                    
+                    # PartitionSpec is a tuple-like object, access it directly
+                    if hasattr(input_spec, '__len__') and len(input_spec) > 0:
+                        sharded_axis_name = input_spec[0]  # Get the first axis name
+                        if sharded_axis_name in self.device_mesh.axis_names:
+                            axis_name = sharded_axis_name
+                        else:
+                            axis_name = self.device_mesh.axis_names[0]  # Fallback
+                    else:
+                        axis_name = self.device_mesh.axis_names[0]  # Default
+                else:
+                    # No context available, use default
+                    axis_name = self.device_mesh.axis_names[0]
+                
                 concat_axis = dimensions[0] if dimensions else 0
                 # Use tiled=True to concatenate along existing axis instead of creating new axis
                 return jax.lax.all_gather(operand, axis_name, axis=concat_axis, tiled=True)
@@ -241,12 +262,12 @@ class HLOInterpreter:
         return result
 
 
-def hlo_to_jax_function(hlo_text: str, device_mesh: Mesh) -> Callable:
+def hlo_to_jax_function(hlo_text: str, device_mesh: Mesh, sharding_context=None) -> Callable:
     """Convert HLO text to a JAX function."""
     parser = HLOParser()
     operations = parser.parse(hlo_text)
     
-    interpreter = HLOInterpreter(device_mesh)
+    interpreter = HLOInterpreter(device_mesh, sharding_context)
     
     def jax_function(*inputs):
         return interpreter.interpret(operations, inputs)

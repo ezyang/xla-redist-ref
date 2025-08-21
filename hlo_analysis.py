@@ -31,8 +31,12 @@ def test_hlo_interpreter_and_extract_stablehlo(
         shutil.rmtree(dump_dir)
     os.makedirs(dump_dir, exist_ok=True)
     
-    # Convert HLO to JAX function
-    jax_func = hlo_to_jax_function(hlo_text, mesh)
+    # Convert HLO to JAX function with sharding context
+    sharding_context = {
+        'input_spec': in_specs,
+        'output_spec': out_specs
+    }
+    jax_func = hlo_to_jax_function(hlo_text, mesh, sharding_context)
     
     # Wrap in shard_map
     sharded_func = partial(
