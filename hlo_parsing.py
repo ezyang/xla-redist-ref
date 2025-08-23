@@ -26,36 +26,43 @@ class HLOParser:
         if dims_str.strip() == "":
             shape = ()  # Scalar shape
         else:
-            shape = tuple(int(d.strip()) for d in dims_str.split(','))
+            dims_list = self.parse_comma_separated_integers(dims_str)
+            shape = tuple(dims_list)
         
         return shape, dtype
     
+    def parse_comma_separated_integers(self, value_str: str) -> List[int]:
+        """Parse comma-separated integers from string like '2,8' into [2, 8]"""
+        if isinstance(value_str, int):
+            return [value_str]
+        elif isinstance(value_str, list):
+            return value_str
+        elif isinstance(value_str, str):
+            if not value_str.strip():
+                return []
+            return [int(x.strip()) for x in value_str.split(',') if x.strip()]
+        else:
+            return [value_str]
+
+    def parse_regex_integer_pairs(self, input_str: str, pattern: str) -> List[Tuple[int, int]]:
+        """Generic method to parse integer pairs using regex pattern"""
+        pairs = []
+        for match in re.finditer(pattern, input_str):
+            first, second = int(match.group(1)), int(match.group(2))
+            pairs.append((first, second))
+        return pairs
+
     def parse_slice_attribute(self, slice_spec: str) -> List[Tuple[int, int]]:
         """Parse slice specification like '[0:2], [1:3]' into list of (start, end) tuples"""
-        ranges = []
-        for match in re.finditer(r'\[(\d+):(\d+)\]', slice_spec):
-            start, end = int(match.group(1)), int(match.group(2))
-            ranges.append((start, end))
-        return ranges
+        return self.parse_regex_integer_pairs(slice_spec, r'\[(\d+):(\d+)\]')
 
     def parse_source_target_pairs_attribute(self, pairs_str: str) -> List[Tuple[int, int]]:
         """Parse source-target pairs from string like '{{0,0},{2,1},{1,2},{3,3}}'"""
-        perm_pairs = []
-        pair_matches = re.findall(r'\{(\d+),(\d+)\}', pairs_str)
-        for src, tgt in pair_matches:
-            perm_pairs.append((int(src), int(tgt)))
-        return perm_pairs
+        return self.parse_regex_integer_pairs(pairs_str, r'\{(\d+),(\d+)\}')
 
     def parse_dynamic_slice_sizes_attribute(self, sizes_str: str) -> List[int]:
         """Parse dynamic slice sizes from string like '2,8' into [2, 8]"""
-        if isinstance(sizes_str, int):
-            return [sizes_str]
-        elif isinstance(sizes_str, list):
-            return sizes_str
-        elif isinstance(sizes_str, str):
-            return [int(x.strip()) for x in sizes_str.split(',')]
-        else:
-            return [sizes_str]
+        return self.parse_comma_separated_integers(sizes_str)
 
     def parse_attributes(self, attr_string: str) -> Dict[str, Any]:
         """Parse HLO attributes like 'dimensions={2}', 'channel_id=1', or 'slice={[0:2], [0:1]}'"""
@@ -110,10 +117,7 @@ class HLOParser:
             # Parse different attribute types
             if attr_name == 'dimensions':
                 # Parse dimensions as list of integers
-                if attr_value:
-                    attributes[attr_name] = [int(d.strip()) for d in attr_value.split(',')]
-                else:
-                    attributes[attr_name] = []
+                attributes[attr_name] = self.parse_comma_separated_integers(attr_value)
             elif attr_name == 'slice':
                 # Parse slice specification into structured format
                 attributes[attr_name] = self.parse_slice_attribute(attr_value)
