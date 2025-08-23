@@ -30,6 +30,33 @@ class HLOParser:
         
         return shape, dtype
     
+    def parse_slice_attribute(self, slice_spec: str) -> List[Tuple[int, int]]:
+        """Parse slice specification like '[0:2], [1:3]' into list of (start, end) tuples"""
+        ranges = []
+        for match in re.finditer(r'\[(\d+):(\d+)\]', slice_spec):
+            start, end = int(match.group(1)), int(match.group(2))
+            ranges.append((start, end))
+        return ranges
+
+    def parse_source_target_pairs_attribute(self, pairs_str: str) -> List[Tuple[int, int]]:
+        """Parse source-target pairs from string like '{{0,0},{2,1},{1,2},{3,3}}'"""
+        perm_pairs = []
+        pair_matches = re.findall(r'\{(\d+),(\d+)\}', pairs_str)
+        for src, tgt in pair_matches:
+            perm_pairs.append((int(src), int(tgt)))
+        return perm_pairs
+
+    def parse_dynamic_slice_sizes_attribute(self, sizes_str: str) -> List[int]:
+        """Parse dynamic slice sizes from string like '2,8' into [2, 8]"""
+        if isinstance(sizes_str, int):
+            return [sizes_str]
+        elif isinstance(sizes_str, list):
+            return sizes_str
+        elif isinstance(sizes_str, str):
+            return [int(x.strip()) for x in sizes_str.split(',')]
+        else:
+            return [sizes_str]
+
     def parse_attributes(self, attr_string: str) -> Dict[str, Any]:
         """Parse HLO attributes like 'dimensions={2}', 'channel_id=1', or 'slice={[0:2], [0:1]}'"""
         attributes = {}
@@ -88,11 +115,14 @@ class HLOParser:
                 else:
                     attributes[attr_name] = []
             elif attr_name == 'slice':
-                # Keep slice specification as string for later parsing
-                attributes[attr_name] = attr_value
+                # Parse slice specification into structured format
+                attributes[attr_name] = self.parse_slice_attribute(attr_value)
             elif attr_name == 'source_target_pairs':
-                # Keep source_target_pairs as string for collective-permute parsing
-                attributes[attr_name] = attr_value
+                # Parse source_target_pairs into structured format
+                attributes[attr_name] = self.parse_source_target_pairs_attribute(attr_value)
+            elif attr_name == 'dynamic_slice_sizes':
+                # Parse dynamic slice sizes into structured format
+                attributes[attr_name] = self.parse_dynamic_slice_sizes_attribute(attr_value)
             elif attr_name.endswith('_id') or (attr_value.isdigit() if attr_value else False):
                 # Parse numeric attributes like channel_id
                 attributes[attr_name] = int(attr_value)
@@ -106,6 +136,34 @@ class HLOParser:
                 
         return attributes
     
+    def parse_constant_operand(self, operand_str: str, dtype: str) -> Any:
+        """Parse constant operand value based on its dtype"""
+        import jax.numpy as jnp
+        
+        if operand_str.startswith('{') and operand_str.endswith('}'):
+            # Handle braced constant like '{0, 0, 1, 1}'
+            values_str = operand_str.strip('{}')
+            if values_str:
+                if dtype.startswith('s') or dtype.startswith('u'):  # integer types
+                    values = [int(x.strip()) for x in values_str.split(',') if x.strip()]
+                else:  # float types
+                    values = [float(x.strip()) for x in values_str.split(',') if x.strip()]
+                return jnp.array(values, dtype=jnp.dtype(self._translate_dtype(dtype)))
+            else:
+                # Empty constant
+                return jnp.array([], dtype=jnp.dtype(self._translate_dtype(dtype)))
+        else:
+            # Single value without braces
+            if dtype.startswith('s') or dtype.startswith('u'):  # integer types
+                value = int(operand_str)
+            else:  # float types  
+                value = float(operand_str)
+            return jnp.array(value, dtype=jnp.dtype(self._translate_dtype(dtype)))
+
+    def _translate_dtype(self, dtype: str) -> str:
+        """Translate HLO dtype to JAX dtype."""
+        return dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')
+
     def parse_operands(self, operand_string: str) -> List[str]:
         """Parse operand list like '%param_0.3, %param_1' -> ['param_0.3', 'param_1']
         Also handles constant values like '{0, 0, 1, 1}' as a single operand."""
@@ -253,7 +311,11 @@ class HLOParser:
         # Parse operands
         if operands_str.strip():
             operands = self.parse_operands(operands_str)
-            if len(operands) == 1:
+            
+            # Special handling for constant operations - parse the value
+            if op_name == 'constant' and operands and dtype:
+                result['constant_value'] = self.parse_constant_operand(operands[0], dtype)
+            elif len(operands) == 1:
                 result['operand'] = operands[0]
             else:
                 result['operands'] = operands

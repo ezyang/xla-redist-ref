@@ -71,62 +71,13 @@ class HLOInterpreter:
                 # Convert to target dtype and return as scalar
                 return partition_id.astype(jnp.dtype(target_dtype))
             
-            # Constant operation: requires 'operands' containing the constant value
-            case {'type': 'constant', 'operands': operands, 'shape': shape, 'dtype': dtype}:
-                # Parse constant value from operands list
-                if operands and isinstance(operands[0], str):
-                    # Handle cases like ['{0', '2', '4', '6}'] - join and parse
-                    if operands[0].startswith('{') and len(operands) > 1:
-                        # Reconstruct the full constant string
-                        const_str = ''.join(operands)
-                        # Remove braces and parse as array
-                        values_str = const_str.strip('{}')
-                        if values_str:
-                            if dtype.startswith('s') or dtype.startswith('u'):  # integer types
-                                values = [int(x.strip()) for x in values_str.split(',') if x.strip()]
-                            else:  # float types
-                                values = [float(x.strip()) for x in values_str.split(',') if x.strip()]
-                            return jnp.array(values, dtype=jnp.dtype(self._translate_dtype(dtype)))
-                        else:
-                            # Empty constant
-                            return jnp.array([], dtype=jnp.dtype(self._translate_dtype(dtype)))
-                    else:
-                        # Single value
-                        if dtype.startswith('s') or dtype.startswith('u'):  # integer types
-                            value = int(operands[0])
-                        else:  # float types  
-                            value = float(operands[0])
-                        return jnp.array(value, dtype=jnp.dtype(self._translate_dtype(dtype)))
-                else:
-                    # Default to zeros if no operands
-                    return jnp.zeros(shape, dtype=jnp.dtype(self._translate_dtype(dtype)))
+            # Constant operation: uses parsed constant value
+            case {'type': 'constant', 'constant_value': value}:
+                return value
             
-            # Constant operation: single 'operand' field (after parser fix)
-            case {'type': 'constant', 'operand': operand, 'shape': shape, 'dtype': dtype}:
-                # Parse constant value from single operand string
-                if operand and isinstance(operand, str):
-                    # Handle braced constant like '{0, 0, 1, 1}'
-                    if operand.startswith('{') and operand.endswith('}'):
-                        values_str = operand.strip('{}')
-                        if values_str:
-                            if dtype.startswith('s') or dtype.startswith('u'):  # integer types
-                                values = [int(x.strip()) for x in values_str.split(',') if x.strip()]
-                            else:  # float types
-                                values = [float(x.strip()) for x in values_str.split(',') if x.strip()]
-                            return jnp.array(values, dtype=jnp.dtype(self._translate_dtype(dtype)))
-                        else:
-                            # Empty constant
-                            return jnp.array([], dtype=jnp.dtype(self._translate_dtype(dtype)))
-                    else:
-                        # Single value without braces
-                        if dtype.startswith('s') or dtype.startswith('u'):  # integer types
-                            value = int(operand)
-                        else:  # float types  
-                            value = float(operand)
-                        return jnp.array(value, dtype=jnp.dtype(self._translate_dtype(dtype)))
-                else:
-                    # Default to zeros if no operand
-                    return jnp.zeros(shape, dtype=jnp.dtype(self._translate_dtype(dtype)))
+            # Fallback for constant operations without parsed value
+            case {'type': 'constant', 'shape': shape, 'dtype': dtype}:
+                return jnp.zeros(shape, dtype=jnp.dtype(self._translate_dtype(dtype)))
             
             # Concatenate operation: requires 'operands' and 'dimensions'
             case {'type': 'concatenate', 'operands': operand_names, 'dimensions': dims}:
@@ -145,19 +96,13 @@ class HLOInterpreter:
                 return jax.lax.reshape(operand, new_shape)
             
             # Slice operation: requires 'operand' and 'slice'
-            case {'type': 'slice', 'operand': operand_name, 'slice': slice_spec}:
+            case {'type': 'slice', 'operand': operand_name, 'slice': slice_ranges}:
                 operand = self.variables[operand_name]
                 
-                # Extract slice ranges
-                ranges = []
-                for match in re.finditer(r'\[(\d+):(\d+)\]', slice_spec):
-                    start, end = int(match.group(1)), int(match.group(2))
-                    ranges.append(slice(start, end))
-                
-                # Apply slicing
+                # Apply slicing using parsed ranges
                 result = operand
-                for i, s in enumerate(ranges):
-                    result = jax.lax.slice_in_dim(result, s.start, s.stop, axis=i)
+                for i, (start, end) in enumerate(slice_ranges):
+                    result = jax.lax.slice_in_dim(result, start, end, axis=i)
                 return result
             
             # Dynamic slice operation: requires 'operands' and 'dynamic_slice_sizes'
@@ -166,17 +111,8 @@ class HLOInterpreter:
                 array = self.variables[operand_names[0]]
                 start_indices = [self.variables[name] for name in operand_names[1:]]
                 
-                # Convert slice_sizes to list if it's a single value
-                if isinstance(slice_sizes, (int, list)):
-                    sizes = slice_sizes if isinstance(slice_sizes, list) else [slice_sizes]
-                elif isinstance(slice_sizes, str):
-                    # Parse comma-separated string like "2,8" into [2, 8]
-                    sizes = [int(x.strip()) for x in slice_sizes.split(',')]
-                else:
-                    sizes = [slice_sizes]
-                
-                # Use JAX dynamic_slice
-                return jax.lax.dynamic_slice(array, start_indices, sizes)
+                # Use parsed slice sizes directly
+                return jax.lax.dynamic_slice(array, start_indices, slice_sizes)
             
             # All-reduce operation: requires 'operand'
             case {'type': 'all-reduce', 'operand': operand_name, **kwargs}:
@@ -244,16 +180,8 @@ class HLOInterpreter:
                 return jax.lax.all_gather(operand, axis_name, axis=concat_axis, tiled=True)
             
             # Collective-permute operation: requires 'operand' and 'source_target_pairs'
-            case {'type': 'collective-permute', 'operand': operand_name, 'source_target_pairs': pairs}:
+            case {'type': 'collective-permute', 'operand': operand_name, 'source_target_pairs': perm_pairs}:
                 operand = self.variables[operand_name]
-                
-                # Parse source-target pairs from string like "{{0,0},{2,1},{1,2},{3,3}}"
-                perm_pairs = []
-                # Extract pairs using regex: find all {number,number} patterns
-                import re
-                pair_matches = re.findall(r'\{(\d+),(\d+)\}', pairs)
-                for src, tgt in pair_matches:
-                    perm_pairs.append((int(src), int(tgt)))
                 
                 # For multi-axis mesh, we need to use all axis names for ppermute
                 # JAX ppermute expects axis_name to be a tuple for multi-axis permutation
