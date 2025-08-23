@@ -106,7 +106,7 @@ def test_hlo_interpreter(
     
     Returns True if the function acts as identity on the full semantic array.
     """
-    is_identity, _, _ = test_hlo_interpreter_and_extract_stablehlo(hlo_text, mesh, in_specs, out_specs, array_shape)
+    is_identity, _, _ = hlo_interpreter_and_extract_stablehlo(hlo_text, mesh, in_specs, out_specs, array_shape)
     return is_identity
 
 

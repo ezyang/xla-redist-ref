@@ -17,7 +17,7 @@ from hlo_generation import generate_hlo_for_sharding_constraints
 from hlo_parsing import HLOParseError, HLOParser
 from hlo_interpretation import HLOInterpreter, hlo_to_jax_function
 from hlo_analysis import (
-    test_hlo_interpreter_and_extract_stablehlo,
+    hlo_interpreter_and_extract_stablehlo,
     test_hlo_interpreter,
     compare_hlos_smart_diff
 )
@@ -40,7 +40,7 @@ if __name__ == "__main__":
     devices = np.array(jax.devices()[:4]).reshape(2, 2)
     mesh = Mesh(devices, ('a', 'b'))
     
-    is_identity, stablehlo_text, post_spmd_hlo_text = test_hlo_interpreter_and_extract_stablehlo(
+    is_identity, stablehlo_text, post_spmd_hlo_text = hlo_interpreter_and_extract_stablehlo(
         hlo, mesh, in_spec, out_spec, array_shape
     )
     print(f"HLO interpreter test: {'PASS' if is_identity else 'FAIL'}")

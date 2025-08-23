@@ -15,7 +15,7 @@ from jax.sharding import Mesh, PartitionSpec as P
 
 from mesh_utils import create_device_mesh
 from hlo_generation import generate_hlo_for_sharding_constraints
-from hlo_analysis import test_hlo_interpreter_and_extract_stablehlo
+from hlo_analysis import hlo_interpreter_and_extract_stablehlo
 
 
 class Test2D2DPlacements(unittest.TestCase):
@@ -35,7 +35,7 @@ class Test2D2DPlacements(unittest.TestCase):
             in_spec, out_spec, self.mesh_shape, self.array_shape
         )
         
-        is_identity, _, _ = test_hlo_interpreter_and_extract_stablehlo(
+        is_identity, _, _ = hlo_interpreter_and_extract_stablehlo(
             hlo, self.mesh, in_spec, out_spec, self.array_shape
         )
         
