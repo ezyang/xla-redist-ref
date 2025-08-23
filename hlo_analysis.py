@@ -13,7 +13,7 @@ from typing import Tuple, Any, Dict, List
 from hlo_interpretation import hlo_to_jax_function
 
 
-def test_hlo_interpreter_and_extract_stablehlo(
+def hlo_interpreter_and_extract_stablehlo(
     hlo_text: str,
     mesh: Mesh,
     in_specs: P,

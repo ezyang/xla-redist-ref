@@ -17,21 +17,37 @@ class HLOInterpreter:
         self.sharding_context = sharding_context or {}
     
     def parse_replica_groups(self, replica_groups_str):
-        """Parse replica_groups using XLA's IotaTileAssignment algorithm.
+        """Parse replica_groups supporting both explicit and iota formats.
         
-        Handles formats like:
-        - "[2,2]<=[4]" 
-        - "[2,2]<=[4]T(1,0)"
+        Formats:
+        - Explicit: {{0,1},{2,3}} or {}
+        - Iota: [2,2]<=[4] or [2,10]<=[4,5]T(1,0)
         
         Returns the axis name to use for the collective operation.
         """
         if not replica_groups_str:
             raise HLOParseError("Missing replica_groups")
         
-        # Parse format: [dims]<=[reshape_dims]T(transpose_perm)
+        if replica_groups_str.startswith('{'):
+            return self._parse_explicit_replica_groups(replica_groups_str)
+        elif replica_groups_str.startswith('['):
+            return self._parse_iota_replica_groups(replica_groups_str)
+        else:
+            raise HLOParseError(f"Invalid replica_groups format: {replica_groups_str}")
+    
+    def _parse_explicit_replica_groups(self, replica_groups_str):
+        """Parse explicit replica_groups format like {{0,1},{2,3}}"""
+        # For explicit format, we need to infer which mesh axis corresponds to the groups
+        # This is a simplified approach - use first available mesh axis
+        mesh_axes = self.device_mesh.axis_names
+        return mesh_axes[0] if mesh_axes else 'default'
+    
+    def _parse_iota_replica_groups(self, replica_groups_str):
+        """Parse iota replica_groups format using IotaTileAssignment algorithm"""
+        # Parse format: [dims]<=[reshape_dims]T?(transpose_perm)?
         match = re.match(r'\[([^\]]+)\]<=\[([^\]]+)\](?:T\(([^)]+)\))?', replica_groups_str)
         if not match:
-            raise HLOParseError(f"Invalid replica_groups format: {replica_groups_str}")
+            raise HLOParseError(f"Invalid iota replica_groups format: {replica_groups_str}")
         
         dims = [int(x.strip()) for x in match.group(1).split(',')]
         reshape_dims = [int(x.strip()) for x in match.group(2).split(',')]

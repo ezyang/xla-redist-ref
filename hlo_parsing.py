@@ -69,40 +69,10 @@ class HLOParser:
                 # Remove outer braces
                 if attr_value.startswith('{') and attr_value.endswith('}'):
                     attr_value = attr_value[1:-1].strip()
-            elif attr_name == 'replica_groups' and attr_string[i] == '[':
-                # Handle replica_groups=[2,2]<=[4] syntax
-                start = i
-                bracket_count = 0
-                while i < len(attr_string):
-                    if attr_string[i] == '[':
-                        bracket_count += 1
-                    elif attr_string[i] == ']':
-                        bracket_count -= 1
-                        if bracket_count == 0:
-                            # Look for optional <=[N]T(...) part
-                            i += 1
-                            if i < len(attr_string) and attr_string[i:i+2] == '<=':
-                                # Skip past <=[...] part
-                                while i < len(attr_string) and attr_string[i] != ']':
-                                    i += 1
-                                if i < len(attr_string) and attr_string[i] == ']':
-                                    i += 1
-                                # Look for optional T(...) part
-                                if i < len(attr_string) and attr_string[i] == 'T':
-                                    i += 1
-                                    if i < len(attr_string) and attr_string[i] == '(':
-                                        # Skip past T(...) including commas inside
-                                        paren_count = 1
-                                        i += 1
-                                        while i < len(attr_string) and paren_count > 0:
-                                            if attr_string[i] == '(':
-                                                paren_count += 1
-                                            elif attr_string[i] == ')':
-                                                paren_count -= 1
-                                            i += 1
-                            break
-                    i += 1
-                attr_value = attr_string[start:i].strip()
+            elif attr_name == 'replica_groups':
+                # Handle both explicit {{0,1},{2,3}} and iota [2,2]<=[4]T(1,0) formats
+                attr_value = self._parse_replica_groups_value(attr_string[i:])
+                i += len(attr_value)
             else:
                 # Handle simple values (no braces)
                 start = i
@@ -178,6 +148,47 @@ class HLOParser:
                 i += 1
         
         return operands
+
+    def _parse_replica_groups_value(self, value_str: str) -> str:
+        """Parse replica_groups attribute value supporting both explicit and iota formats.
+        
+        Grammar:
+        - explicit: {{0,1},{2,3}} or {} or {{},{}}  
+        - iota: [2,2]<=[4] or [2,10]<=[4,5]T(1,0)
+        """
+        value_str = value_str.strip()
+        
+        if value_str.startswith('{'):
+            # Explicit format: parse nested braces
+            return self._parse_explicit_replica_groups(value_str)
+        elif value_str.startswith('['):
+            # Iota format: parse [dims]<=[reshape]T?(perm)?
+            return self._parse_iota_replica_groups(value_str)
+        else:
+            raise HLOParseError(f"Invalid replica_groups format: {value_str}")
+    
+    def _parse_explicit_replica_groups(self, value_str: str) -> str:
+        """Parse explicit replica_groups format like {{0,1},{2,3}} or {}"""
+        brace_count = 0
+        i = 0
+        while i < len(value_str):
+            if value_str[i] == '{':
+                brace_count += 1
+            elif value_str[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    return value_str[:i+1]
+            i += 1
+        raise HLOParseError(f"Unmatched braces in replica_groups: {value_str}")
+    
+    def _parse_iota_replica_groups(self, value_str: str) -> str:
+        """Parse iota replica_groups format like [2,2]<=[4] or [2,10]<=[4,5]T(1,0)"""
+        # Use regex to match the full iota pattern
+        pattern = r'\[[\d,]+\]<=\[[\d,]+\](?:T\([\d,]+\))?'
+        match = re.match(pattern, value_str)
+        if not match:
+            raise HLOParseError(f"Invalid iota replica_groups format: {value_str}")
+        return match.group(0)
 
     def parse_operation(self, line: str) -> Optional[Dict[str, Any]]:
         """Parse a single HLO operation line generically."""
