@@ -16,6 +16,10 @@ class HLOInterpreter:
         self.device_mesh = device_mesh
         self.sharding_context = sharding_context or {}
     
+    def _translate_dtype(self, dtype: str) -> str:
+        """Translate HLO dtype to JAX dtype."""
+        return dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')
+    
     def parse_replica_groups(self, replica_groups_str):
         """Parse replica_groups supporting both explicit and iota formats.
         
@@ -185,20 +189,20 @@ class HLOInterpreter:
                                 values = [int(x.strip()) for x in values_str.split(',') if x.strip()]
                             else:  # float types
                                 values = [float(x.strip()) for x in values_str.split(',') if x.strip()]
-                            return jnp.array(values, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                            return jnp.array(values, dtype=jnp.dtype(self._translate_dtype(dtype)))
                         else:
                             # Empty constant
-                            return jnp.array([], dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                            return jnp.array([], dtype=jnp.dtype(self._translate_dtype(dtype)))
                     else:
                         # Single value
                         if dtype.startswith('s') or dtype.startswith('u'):  # integer types
                             value = int(operands[0])
                         else:  # float types  
                             value = float(operands[0])
-                        return jnp.array(value, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                        return jnp.array(value, dtype=jnp.dtype(self._translate_dtype(dtype)))
                 else:
                     # Default to zeros if no operands
-                    return jnp.zeros(shape, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                    return jnp.zeros(shape, dtype=jnp.dtype(self._translate_dtype(dtype)))
             
             # Constant operation: single 'operand' field (after parser fix)
             case {'type': 'constant', 'operand': operand, 'shape': shape, 'dtype': dtype}:
@@ -212,20 +216,20 @@ class HLOInterpreter:
                                 values = [int(x.strip()) for x in values_str.split(',') if x.strip()]
                             else:  # float types
                                 values = [float(x.strip()) for x in values_str.split(',') if x.strip()]
-                            return jnp.array(values, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                            return jnp.array(values, dtype=jnp.dtype(self._translate_dtype(dtype)))
                         else:
                             # Empty constant
-                            return jnp.array([], dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                            return jnp.array([], dtype=jnp.dtype(self._translate_dtype(dtype)))
                     else:
                         # Single value without braces
                         if dtype.startswith('s') or dtype.startswith('u'):  # integer types
                             value = int(operand)
                         else:  # float types  
                             value = float(operand)
-                        return jnp.array(value, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                        return jnp.array(value, dtype=jnp.dtype(self._translate_dtype(dtype)))
                 else:
                     # Default to zeros if no operand
-                    return jnp.zeros(shape, dtype=jnp.dtype(dtype.replace('s32', 'int32').replace('u32', 'uint32').replace('f32', 'float32')))
+                    return jnp.zeros(shape, dtype=jnp.dtype(self._translate_dtype(dtype)))
             
             # Concatenate operation: requires 'operands' and 'dimensions'
             case {'type': 'concatenate', 'operands': operand_names, 'dimensions': dims}:
