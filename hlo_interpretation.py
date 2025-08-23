@@ -15,6 +15,95 @@ class HLOInterpreter:
         self.variables = {}
         self.device_mesh = device_mesh
         self.sharding_context = sharding_context or {}
+    
+    def parse_replica_groups(self, replica_groups_str):
+        """Parse replica_groups using XLA's IotaTileAssignment algorithm.
+        
+        Handles formats like:
+        - "[2,2]<=[4]" 
+        - "[2,2]<=[4]T(1,0)"
+        
+        Returns the axis name to use for the collective operation.
+        """
+        if not replica_groups_str:
+            raise HLOParseError("Missing replica_groups")
+        
+        # Parse format: [dims]<=[reshape_dims]T(transpose_perm)
+        match = re.match(r'\[([^\]]+)\]<=\[([^\]]+)\](?:T\(([^)]+)\))?', replica_groups_str)
+        if not match:
+            raise HLOParseError(f"Invalid replica_groups format: {replica_groups_str}")
+        
+        dims = [int(x.strip()) for x in match.group(1).split(',')]
+        reshape_dims = [int(x.strip()) for x in match.group(2).split(',')]
+        transpose_perm = None
+        if match.group(3):
+            transpose_perm = [int(x.strip()) for x in match.group(3).split(',')]
+        
+        # Apply the IotaTileAssignment algorithm
+        N = np.prod(reshape_dims)
+        iota_array = np.arange(N)  # [0,1,2,...,N-1]
+        
+        # Reshape to reshape_dims
+        reshaped = iota_array.reshape(reshape_dims)
+        
+        # Apply transpose if present
+        if transpose_perm:
+            reshaped = np.transpose(reshaped, transpose_perm)
+        
+        # Final reshape to dims
+        groups = reshaped.reshape(dims)
+        
+        # Convert to list of lists for comparison
+        group_lists = [list(groups[i]) for i in range(groups.shape[0])]
+        
+        # Now determine which mesh axis corresponds to these groups
+        # Generate expected groups for each mesh axis and compare
+        mesh_shape_list = list(self.device_mesh.shape.values())
+        axis_name = None
+        
+        for axis_idx in range(len(mesh_shape_list)):
+            # Generate expected groups for this axis using the same algorithm
+            expected_groups = []
+            
+            # For axis_idx, generate groups by fixing other coordinates and varying this one
+            other_dims = [mesh_shape_list[i] for i in range(len(mesh_shape_list)) if i != axis_idx]
+            if len(other_dims) == 0:
+                # Single dimension mesh
+                group = list(range(mesh_shape_list[axis_idx]))
+                expected_groups = [group]
+            else:
+                for other_coords in np.ndindex(*other_dims):
+                    group = []
+                    for axis_val in range(mesh_shape_list[axis_idx]):
+                        # Insert axis_val at position axis_idx
+                        full_coords = []
+                        other_idx = 0
+                        for i in range(len(mesh_shape_list)):
+                            if i == axis_idx:
+                                full_coords.append(axis_val)
+                            else:
+                                full_coords.append(other_coords[other_idx])
+                                other_idx += 1
+                        
+                        # Convert to flat device ID (row-major)
+                        flat_id = 0
+                        for i, coord in enumerate(full_coords):
+                            flat_id = flat_id * mesh_shape_list[i] + coord
+                        group.append(flat_id)
+                    expected_groups.append(sorted(group))
+            
+            # Sort both for comparison
+            expected_groups_sorted = [sorted(g) for g in sorted(expected_groups)]
+            group_lists_sorted = [sorted(g) for g in sorted(group_lists)]
+            
+            if expected_groups_sorted == group_lists_sorted:
+                axis_name = self.device_mesh.axis_names[axis_idx]
+                break
+        
+        if axis_name is None:
+            raise HLOParseError(f"Could not match replica groups {group_lists} to any mesh axis")
+        
+        return axis_name
         
     def interpret_operation(self, op: Dict[str, Any], inputs: List[Any]) -> Any:
         """Interpret a single HLO operation as JAX LAX primitives using pattern matching."""
@@ -173,11 +262,18 @@ class HLOInterpreter:
                 return jax.lax.dynamic_slice(array, start_indices, sizes)
             
             # All-reduce operation: requires 'operand'
-            case {'type': 'all-reduce', 'operand': operand_name}:
+            case {'type': 'all-reduce', 'operand': operand_name, **kwargs}:
                 operand = self.variables[operand_name]
-                # For all-reduce, we sum across all devices using the device mesh
-                axis_names = self.device_mesh.axis_names
-                return jax.lax.psum(operand, axis_name=axis_names)
+                
+                # First try to use replica_groups if available
+                replica_groups = kwargs.get('replica_groups', '')
+                if replica_groups:
+                    axis_name = self.parse_replica_groups(replica_groups)
+                    return jax.lax.psum(operand, axis_name=axis_name)
+                else:
+                    # For all-reduce, we sum across all devices using the device mesh
+                    axis_names = self.device_mesh.axis_names
+                    return jax.lax.psum(operand, axis_name=axis_names)
             
             # Reshape operation: requires 'operand' and 'shape'
             case {'type': 'reshape', 'operand': operand_name, 'shape': shape}:
@@ -190,86 +286,9 @@ class HLOInterpreter:
                 split_axis = dimensions[0] if dimensions else 0
                 concat_axis = split_axis
                 
-                # Parse replica_groups using XLA's IotaTileAssignment algorithm
+                # Parse replica_groups using unified function
                 replica_groups = kwargs.get('replica_groups', '')
-                if not replica_groups:
-                    raise HLOParseError("All-to-all operation missing replica_groups")
-                
-                # Parse format: [dims]<=[reshape_dims]T(transpose_perm)
-                import re
-                match = re.match(r'\[([^\]]+)\]<=\[([^\]]+)\](?:T\(([^)]+)\))?', replica_groups)
-                if not match:
-                    raise HLOParseError(f"Invalid replica_groups format: {replica_groups}")
-                
-                dims = [int(x.strip()) for x in match.group(1).split(',')]
-                reshape_dims = [int(x.strip()) for x in match.group(2).split(',')]
-                transpose_perm = None
-                if match.group(3):
-                    transpose_perm = [int(x.strip()) for x in match.group(3).split(',')]
-                
-                # Apply the IotaTileAssignment algorithm
-                N = np.prod(reshape_dims)
-                iota_array = np.arange(N)  # [0,1,2,...,N-1]
-                
-                # Reshape to reshape_dims
-                reshaped = iota_array.reshape(reshape_dims)
-                
-                # Apply transpose if present
-                if transpose_perm:
-                    reshaped = np.transpose(reshaped, transpose_perm)
-                
-                # Final reshape to dims
-                groups = reshaped.reshape(dims)
-                
-                # Convert to list of lists for comparison
-                group_lists = [list(groups[i]) for i in range(groups.shape[0])]
-                
-                # Now determine which mesh axis corresponds to these groups
-                # Generate expected groups for each mesh axis and compare
-                mesh_shape_list = list(self.device_mesh.shape.values())
-                axis_name = None
-                
-                for axis_idx in range(len(mesh_shape_list)):
-                    # Generate expected groups for this axis using the same algorithm as your intern
-                    expected_groups = []
-                    
-                    # For axis_idx, generate groups by fixing other coordinates and varying this one
-                    other_dims = [mesh_shape_list[i] for i in range(len(mesh_shape_list)) if i != axis_idx]
-                    if len(other_dims) == 0:
-                        # Single dimension mesh
-                        group = list(range(mesh_shape_list[axis_idx]))
-                        expected_groups = [group]
-                    else:
-                        for other_coords in np.ndindex(*other_dims):
-                            group = []
-                            for axis_val in range(mesh_shape_list[axis_idx]):
-                                # Insert axis_val at position axis_idx
-                                full_coords = []
-                                other_idx = 0
-                                for i in range(len(mesh_shape_list)):
-                                    if i == axis_idx:
-                                        full_coords.append(axis_val)
-                                    else:
-                                        full_coords.append(other_coords[other_idx])
-                                        other_idx += 1
-                                
-                                # Convert to flat device ID (row-major)
-                                flat_id = 0
-                                for i, coord in enumerate(full_coords):
-                                    flat_id = flat_id * mesh_shape_list[i] + coord
-                                group.append(flat_id)
-                            expected_groups.append(sorted(group))
-                    
-                    # Sort both for comparison
-                    expected_groups_sorted = [sorted(g) for g in sorted(expected_groups)]
-                    group_lists_sorted = [sorted(g) for g in sorted(group_lists)]
-                    
-                    if expected_groups_sorted == group_lists_sorted:
-                        axis_name = self.device_mesh.axis_names[axis_idx]
-                        break
-                
-                if axis_name is None:
-                    raise HLOParseError(f"Could not match replica groups {group_lists} to any mesh axis")
+                axis_name = self.parse_replica_groups(replica_groups)
                 
                 return jax.lax.all_to_all(operand, axis_name, split_axis, concat_axis)
             
@@ -277,26 +296,31 @@ class HLOInterpreter:
             case {'type': 'all-gather', 'operand': operand_name, 'dimensions': dimensions, **kwargs}:
                 operand = self.variables[operand_name]
                 
-                # Use sharding context to determine the correct axis for all-gather
-                input_spec = self.sharding_context.get('input_spec', None)
-                output_spec = self.sharding_context.get('output_spec', None)
-                
-                if input_spec is not None and output_spec is not None:
-                    # We have sharding context - use it to determine the axis
-                    # For X -> P(None) transformations, gather along the axis that X specifies
-                    
-                    # PartitionSpec is a tuple-like object, access it directly
-                    if hasattr(input_spec, '__len__') and len(input_spec) > 0:
-                        sharded_axis_name = input_spec[0]  # Get the first axis name
-                        if sharded_axis_name in self.device_mesh.axis_names:
-                            axis_name = sharded_axis_name
-                        else:
-                            axis_name = self.device_mesh.axis_names[0]  # Fallback
-                    else:
-                        axis_name = self.device_mesh.axis_names[0]  # Default
+                # First try to use replica_groups if available
+                replica_groups = kwargs.get('replica_groups', '')
+                if replica_groups:
+                    axis_name = self.parse_replica_groups(replica_groups)
                 else:
-                    # No context available, use default
-                    axis_name = self.device_mesh.axis_names[0]
+                    # Fallback to sharding context
+                    input_spec = self.sharding_context.get('input_spec', None)
+                    output_spec = self.sharding_context.get('output_spec', None)
+                    
+                    if input_spec is not None and output_spec is not None:
+                        # We have sharding context - use it to determine the axis
+                        # For X -> P(None) transformations, gather along the axis that X specifies
+                        
+                        # PartitionSpec is a tuple-like object, access it directly
+                        if hasattr(input_spec, '__len__') and len(input_spec) > 0:
+                            sharded_axis_name = input_spec[0]  # Get the first axis name
+                            if sharded_axis_name in self.device_mesh.axis_names:
+                                axis_name = sharded_axis_name
+                            else:
+                                axis_name = self.device_mesh.axis_names[0]  # Fallback
+                        else:
+                            axis_name = self.device_mesh.axis_names[0]  # Default
+                    else:
+                        # No context available, use default
+                        axis_name = self.device_mesh.axis_names[0]
                 
                 concat_axis = dimensions[0] if dimensions else 0
                 # Use tiled=True to concatenate along existing axis instead of creating new axis
