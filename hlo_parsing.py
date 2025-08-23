@@ -69,6 +69,25 @@ class HLOParser:
                 # Remove outer braces
                 if attr_value.startswith('{') and attr_value.endswith('}'):
                     attr_value = attr_value[1:-1].strip()
+            elif attr_name == 'replica_groups' and attr_string[i] == '[':
+                # Handle replica_groups=[2,2]<=[4] syntax
+                start = i
+                bracket_count = 0
+                while i < len(attr_string):
+                    if attr_string[i] == '[':
+                        bracket_count += 1
+                    elif attr_string[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            # Look for optional <=[N] part
+                            i += 1
+                            if i < len(attr_string) and attr_string[i:i+2] == '<=':
+                                # Skip past <=[N] part
+                                while i < len(attr_string) and attr_string[i] not in ', \t':
+                                    i += 1
+                            break
+                    i += 1
+                attr_value = attr_string[start:i].strip()
             else:
                 # Handle simple values (no braces)
                 start = i

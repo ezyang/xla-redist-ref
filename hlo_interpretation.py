@@ -2,6 +2,7 @@ import re
 import jax
 import jax.lax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh
 from typing import Dict, Any, List, Callable
 from hlo_parsing import HLOParseError, HLOParser
@@ -184,12 +185,92 @@ class HLOInterpreter:
                 return jax.lax.reshape(operand, shape)
             
             # All-to-all operation: requires 'operand' and 'dimensions'
-            case {'type': 'all-to-all', 'operand': operand_name, 'dimensions': dimensions}:
+            case {'type': 'all-to-all', 'operand': operand_name, 'dimensions': dimensions, **kwargs}:
                 operand = self.variables[operand_name]
-                # Use the specified dimension for all-to-all communication
                 split_axis = dimensions[0] if dimensions else 0
                 concat_axis = split_axis
-                axis_name = self.device_mesh.axis_names[0]  # Use first mesh axis
+                
+                # Parse replica_groups using XLA's IotaTileAssignment algorithm
+                replica_groups = kwargs.get('replica_groups', '')
+                if not replica_groups:
+                    raise HLOParseError("All-to-all operation missing replica_groups")
+                
+                # Parse format: [dims]<=[reshape_dims]T(transpose_perm)
+                import re
+                match = re.match(r'\[([^\]]+)\]<=\[([^\]]+)\](?:T\(([^)]+)\))?', replica_groups)
+                if not match:
+                    raise HLOParseError(f"Invalid replica_groups format: {replica_groups}")
+                
+                dims = [int(x.strip()) for x in match.group(1).split(',')]
+                reshape_dims = [int(x.strip()) for x in match.group(2).split(',')]
+                transpose_perm = None
+                if match.group(3):
+                    transpose_perm = [int(x.strip()) for x in match.group(3).split(',')]
+                
+                # Apply the IotaTileAssignment algorithm
+                N = np.prod(reshape_dims)
+                iota_array = np.arange(N)  # [0,1,2,...,N-1]
+                
+                # Reshape to reshape_dims
+                reshaped = iota_array.reshape(reshape_dims)
+                
+                # Apply transpose if present
+                if transpose_perm:
+                    reshaped = np.transpose(reshaped, transpose_perm)
+                
+                # Final reshape to dims
+                groups = reshaped.reshape(dims)
+                
+                # Convert to list of lists for comparison
+                group_lists = [list(groups[i]) for i in range(groups.shape[0])]
+                
+                # Now determine which mesh axis corresponds to these groups
+                # Generate expected groups for each mesh axis and compare
+                mesh_shape_list = list(self.device_mesh.shape.values())
+                axis_name = None
+                
+                for axis_idx in range(len(mesh_shape_list)):
+                    # Generate expected groups for this axis using the same algorithm as your intern
+                    expected_groups = []
+                    
+                    # For axis_idx, generate groups by fixing other coordinates and varying this one
+                    other_dims = [mesh_shape_list[i] for i in range(len(mesh_shape_list)) if i != axis_idx]
+                    if len(other_dims) == 0:
+                        # Single dimension mesh
+                        group = list(range(mesh_shape_list[axis_idx]))
+                        expected_groups = [group]
+                    else:
+                        for other_coords in np.ndindex(*other_dims):
+                            group = []
+                            for axis_val in range(mesh_shape_list[axis_idx]):
+                                # Insert axis_val at position axis_idx
+                                full_coords = []
+                                other_idx = 0
+                                for i in range(len(mesh_shape_list)):
+                                    if i == axis_idx:
+                                        full_coords.append(axis_val)
+                                    else:
+                                        full_coords.append(other_coords[other_idx])
+                                        other_idx += 1
+                                
+                                # Convert to flat device ID (row-major)
+                                flat_id = 0
+                                for i, coord in enumerate(full_coords):
+                                    flat_id = flat_id * mesh_shape_list[i] + coord
+                                group.append(flat_id)
+                            expected_groups.append(sorted(group))
+                    
+                    # Sort both for comparison
+                    expected_groups_sorted = [sorted(g) for g in sorted(expected_groups)]
+                    group_lists_sorted = [sorted(g) for g in sorted(group_lists)]
+                    
+                    if expected_groups_sorted == group_lists_sorted:
+                        axis_name = self.device_mesh.axis_names[axis_idx]
+                        break
+                
+                if axis_name is None:
+                    raise HLOParseError(f"Could not match replica groups {group_lists} to any mesh axis")
+                
                 return jax.lax.all_to_all(operand, axis_name, split_axis, concat_axis)
             
             # All-gather operation: requires 'operand' and 'dimensions' 
