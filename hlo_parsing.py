@@ -79,12 +79,27 @@ class HLOParser:
                     elif attr_string[i] == ']':
                         bracket_count -= 1
                         if bracket_count == 0:
-                            # Look for optional <=[N] part
+                            # Look for optional <=[N]T(...) part
                             i += 1
                             if i < len(attr_string) and attr_string[i:i+2] == '<=':
-                                # Skip past <=[N] part
-                                while i < len(attr_string) and attr_string[i] not in ', \t':
+                                # Skip past <=[...] part
+                                while i < len(attr_string) and attr_string[i] != ']':
                                     i += 1
+                                if i < len(attr_string) and attr_string[i] == ']':
+                                    i += 1
+                                # Look for optional T(...) part
+                                if i < len(attr_string) and attr_string[i] == 'T':
+                                    i += 1
+                                    if i < len(attr_string) and attr_string[i] == '(':
+                                        # Skip past T(...) including commas inside
+                                        paren_count = 1
+                                        i += 1
+                                        while i < len(attr_string) and paren_count > 0:
+                                            if attr_string[i] == '(':
+                                                paren_count += 1
+                                            elif attr_string[i] == ')':
+                                                paren_count -= 1
+                                            i += 1
                             break
                     i += 1
                 attr_value = attr_string[start:i].strip()
